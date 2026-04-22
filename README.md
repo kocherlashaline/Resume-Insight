@@ -1,3 +1,4 @@
+
 # 🎯 ResumeIQ — AI Career Coach
 
 A brutally honest AI-powered resume analyzer built with Gemini 1.5 Pro, Adzuna Jobs API, and Streamlit.
@@ -65,3 +66,4 @@ resume-roaster/
 - API integration (Gemini, Adzuna, web scraping)
 - Full-stack AI application deployment
 - Streamlit UI with persistent session state
+
