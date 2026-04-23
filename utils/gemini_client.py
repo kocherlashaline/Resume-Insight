@@ -7,12 +7,11 @@ import time
 
 _client: genai.Client | None = None
 
-# Each model has its own separate free-tier daily quota — fall through all three
+# Each model has its own separate free-tier daily quota — fall through both
 # before giving up. gemini-2.0-flash is tried first (best quality).
 _FALLBACK_MODELS = [
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+    "gemini-2.0-flash-lite",
 ]
 
 def init_gemini(api_key: str):
@@ -34,14 +33,18 @@ def _generate(prompt: str) -> str:
                 response = client.models.generate_content(model=model, contents=prompt)
                 return response.text
             except genai_errors.ClientError as e:
+                if e.code == 404:
+                    break           # model not available in this API version — skip
                 if e.code != 429:
                     raise
                 last_429 = e
                 if attempt == 0:
                     time.sleep(20)  # wait out per-minute rate limit, then retry
                 else:
-                    break           # still failing — try next model
-    raise QuotaExceededError(str(last_429)) from last_429
+                    break           # still 429 after retry — try next model
+    if last_429:
+        raise QuotaExceededError(str(last_429)) from last_429
+    raise RuntimeError("No available Gemini models responded. Check your API key.")
 
 
 class QuotaExceededError(Exception):
