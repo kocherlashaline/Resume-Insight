@@ -6,7 +6,14 @@ import re
 import time
 
 _client: genai.Client | None = None
-MODEL = "gemini-2.0-flash"
+
+# Each model has its own separate free-tier daily quota — fall through all three
+# before giving up. gemini-2.0-flash is tried first (best quality).
+_FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
 
 def init_gemini(api_key: str):
     global _client
@@ -18,19 +25,23 @@ def _get_client() -> genai.Client:
     return _client
 
 def _generate(prompt: str) -> str:
-    """Call Gemini; retry once after 20 s on 429 to ride out per-minute rate limits."""
+    """Try each fallback model in order. On 429, retry once after 20 s then move on."""
     client = _get_client()
-    for attempt in range(2):
-        try:
-            response = client.models.generate_content(model=MODEL, contents=prompt)
-            return response.text
-        except genai_errors.ClientError as e:
-            if e.code == 429:
+    last_429 = None
+    for model in _FALLBACK_MODELS:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(model=model, contents=prompt)
+                return response.text
+            except genai_errors.ClientError as e:
+                if e.code != 429:
+                    raise
+                last_429 = e
                 if attempt == 0:
-                    time.sleep(20)
-                    continue
-                raise QuotaExceededError(str(e)) from e
-            raise
+                    time.sleep(20)  # wait out per-minute rate limit, then retry
+                else:
+                    break           # still failing — try next model
+    raise QuotaExceededError(str(last_429)) from last_429
 
 
 class QuotaExceededError(Exception):
@@ -41,11 +52,11 @@ def _quota_error_dict() -> Dict:
     return {
         "error": "quota_exceeded",
         "raw": (
-            "Gemini returned a rate-limit error (HTTP 429) after one automatic retry.\n\n"
-            "**Most likely cause:** the free tier allows ~15 requests/minute. "
-            "Wait 60 seconds and try again.\n\n"
-            "If you've already made 1,500+ requests today the daily quota is exhausted — "
-            "wait until midnight Pacific or enable billing at https://ai.google.dev."
+            "All three free-tier Gemini models (2.0-flash, 1.5-flash, 1.5-flash-8b) returned "
+            "HTTP 429. Your daily quota across all models is likely exhausted.\n\n"
+            "**Options:** (1) wait until midnight Pacific for quotas to reset, "
+            "(2) use a different Gemini API key, or "
+            "(3) enable billing at https://ai.google.dev."
         ),
     }
 
