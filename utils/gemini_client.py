@@ -3,6 +3,7 @@ from google.genai import errors as genai_errors
 from typing import List, Dict
 import json
 import re
+import time
 
 _client: genai.Client | None = None
 MODEL = "gemini-2.0-flash"
@@ -17,14 +18,19 @@ def _get_client() -> genai.Client:
     return _client
 
 def _generate(prompt: str) -> str:
+    """Call Gemini; retry once after 20 s on 429 to ride out per-minute rate limits."""
     client = _get_client()
-    try:
-        response = client.models.generate_content(model=MODEL, contents=prompt)
-        return response.text
-    except genai_errors.ClientError as e:
-        if e.code == 429:
-            raise QuotaExceededError(str(e)) from e
-        raise
+    for attempt in range(2):
+        try:
+            response = client.models.generate_content(model=MODEL, contents=prompt)
+            return response.text
+        except genai_errors.ClientError as e:
+            if e.code == 429:
+                if attempt == 0:
+                    time.sleep(20)
+                    continue
+                raise QuotaExceededError(str(e)) from e
+            raise
 
 
 class QuotaExceededError(Exception):
@@ -35,10 +41,11 @@ def _quota_error_dict() -> Dict:
     return {
         "error": "quota_exceeded",
         "raw": (
-            "Your Gemini API free-tier quota is exhausted for today. "
-            "Options: (1) wait until tomorrow for the quota to reset, "
-            "(2) enable billing at https://ai.google.dev to get higher limits, "
-            "or (3) use a different API key."
+            "Gemini returned a rate-limit error (HTTP 429) after one automatic retry.\n\n"
+            "**Most likely cause:** the free tier allows ~15 requests/minute. "
+            "Wait 60 seconds and try again.\n\n"
+            "If you've already made 1,500+ requests today the daily quota is exhausted — "
+            "wait until midnight Pacific or enable billing at https://ai.google.dev."
         ),
     }
 
