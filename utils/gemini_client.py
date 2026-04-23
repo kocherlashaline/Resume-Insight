@@ -171,6 +171,44 @@ Be specific and actionable. Plain text, bullet points with dashes.
         return "Gemini quota exhausted. Please wait until tomorrow or enable billing at https://ai.google.dev."
 
 
+def embed_text(text: str) -> List[float]:
+    """Return a text-embedding-004 vector for the given text."""
+    client = _get_client()
+    result = client.models.embed_content(
+        model="text-embedding-004",
+        contents=text,
+    )
+    return result.embeddings[0].values
+
+
+def answer_jd_query(question: str, retrieved_jds: List[Dict], resume_text: str = "") -> str:
+    """RAG: use retrieved JDs as context and Gemini as the generator."""
+    context_parts = []
+    for i, jd in enumerate(retrieved_jds, 1):
+        label = jd.get("title", f"JD {i}")
+        if jd.get("company"):
+            label += f" at {jd['company']}"
+        context_parts.append(f"[JD {i}: {label}]\n{jd['text'][:2000]}")
+
+    context = "\n\n---\n\n".join(context_parts)
+    resume_section = f"\n\nCANDIDATE RESUME:\n{resume_text[:1500]}" if resume_text else ""
+
+    prompt = f"""You are a career advisor helping a job seeker compare and evaluate job descriptions.
+
+QUESTION: {question}
+{resume_section}
+
+RELEVANT JOB DESCRIPTIONS (retrieved by semantic similarity to the question):
+{context}
+
+Answer the question thoughtfully. When comparing roles, rank them clearly. Cite JDs by title/company name. Be specific and actionable."""
+
+    try:
+        return _generate(prompt)
+    except QuotaExceededError:
+        return "Gemini quota exhausted. Please wait or enable billing at https://ai.google.dev."
+
+
 def _parse_json_response(text: str) -> Dict:
     try:
         cleaned = re.sub(r"```json|```", "", text).strip()

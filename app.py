@@ -9,7 +9,10 @@ from utils.gemini_client import (
     analyze_jd_gaps,
     rank_jobs_against_resume,
     generate_market_insights,
+    embed_text,
+    answer_jd_query,
 )
+from utils.jd_vector_store import create_store, add_jds, query_store
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -88,10 +91,11 @@ with st.expander("📄 Upload Your Resume (required for all features)", expanded
 resume_text = st.session_state.get("resume_text", "")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "💥 Roast My Resume",
     "🔍 Find Matching Jobs",
     "🔗 Analyze JD URL",
+    "🗂️ Chat with Multiple JDs",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -361,6 +365,157 @@ with tab3:
                     for i, qw in enumerate(result.get("quick_wins", []), 1):
                         st.success(f"**{i}.** {qw}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — CHAT WITH MULTIPLE JDs (RAG)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("🗂️ Chat with Multiple JDs")
+    st.caption(
+        "Upload up to 20 job descriptions → embed them into ChromaDB using Google's "
+        "text-embedding-004 model → ask questions across all of them via semantic search + Gemini (genuine RAG)"
+    )
+
+    col_left, col_right = st.columns([3, 2])
+
+    with col_left:
+        st.markdown("**Step 1 — Load Job Descriptions**")
+        jd_files = st.file_uploader(
+            "Upload JD PDFs (select up to 20)",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="multi_jd_pdfs",
+        )
+        if jd_files and len(jd_files) > 20:
+            st.warning("Please select at most 20 files.")
+            jd_files = jd_files[:20]
+
+        with st.expander("Or paste a JD manually"):
+            jd_paste_text = st.text_area(
+                "JD Text",
+                height=120,
+                placeholder="Paste job description text here...",
+                key="tab4_paste_text",
+                label_visibility="collapsed",
+            )
+            jd_paste_label = st.text_input(
+                "Label for this JD",
+                placeholder="e.g., Senior ML Engineer — Acme Corp",
+                key="tab4_paste_label",
+            )
+
+        paste_present = bool(st.session_state.get("tab4_paste_text", "").strip())
+        total_to_embed = len(jd_files or []) + (1 if paste_present else 0)
+        embed_ready = bool(gemini_key) and total_to_embed > 0
+
+        if st.button(
+            f"🔗 Embed {total_to_embed} JD(s) into ChromaDB" if total_to_embed else "🔗 Embed JDs into ChromaDB",
+            type="primary",
+            disabled=not embed_ready,
+        ):
+            if not gemini_key:
+                st.warning("Add your Gemini API key in the sidebar first.")
+            else:
+                jd_docs = []
+                for i, f in enumerate(jd_files or []):
+                    text = extract_text_from_pdf(f)
+                    jd_docs.append({
+                        "id": f"jd_{i}",
+                        "title": f.name.rsplit(".", 1)[0],
+                        "text": text,
+                    })
+
+                paste_txt = st.session_state.get("tab4_paste_text", "").strip()
+                if paste_txt:
+                    paste_lbl = st.session_state.get("tab4_paste_label", "").strip() or f"Pasted JD {len(jd_docs) + 1}"
+                    jd_docs.append({
+                        "id": f"jd_{len(jd_docs)}",
+                        "title": paste_lbl,
+                        "text": paste_txt,
+                    })
+
+                if not jd_docs:
+                    st.warning("No JDs found to embed.")
+                else:
+                    progress = st.progress(0, text="Initialising ChromaDB...")
+                    client, collection = create_store()
+
+                    for i, doc in enumerate(jd_docs):
+                        progress.progress(i / len(jd_docs), text=f"Embedding: {doc['title'][:50]}…")
+                        add_jds(collection, [doc], embed_text)
+
+                    progress.progress(1.0, text="Done!")
+
+                    st.session_state.jd_collection = collection
+                    st.session_state.jd_chroma_client = client
+                    st.session_state.jd_metadata = [
+                        {"title": d["title"], "char_count": len(d["text"])} for d in jd_docs
+                    ]
+                    st.session_state.jd_chat_history = []
+                    st.success(f"✅ {len(jd_docs)} JDs embedded — vector store ready for semantic search!")
+                    st.rerun()
+
+    with col_right:
+        st.markdown("**Embedded JDs**")
+        meta = st.session_state.get("jd_metadata", [])
+        if meta:
+            for m in meta:
+                st.markdown(f"📄 **{m['title']}** _({m['char_count']:,} chars)_")
+            st.caption(f"{len(meta)} JD(s) stored in ChromaDB")
+            if st.button("🗑️ Clear vector store"):
+                for k in ("jd_collection", "jd_chroma_client", "jd_metadata", "jd_chat_history"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+        else:
+            st.info("No JDs embedded yet.")
+            st.caption("Upload PDFs or paste text, then click Embed.")
+
+    # ── Chat ──────────────────────────────────────────────────────────────────
+    jd_collection = st.session_state.get("jd_collection")
+    if jd_collection and jd_collection.count() > 0:
+        st.divider()
+        st.markdown("### 💬 Ask Questions Across All JDs")
+        st.caption(
+            "Try: _'Which roles match my Kubeflow background?'_ · "
+            "_'Which JDs require Spark?'_ · _'Compare the two ML engineer roles'_"
+        )
+
+        history = st.session_state.get("jd_chat_history", [])
+
+        for msg in history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("retrieved_jds"):
+                    with st.expander(f"🔍 {len(msg['retrieved_jds'])} JDs retrieved by vector search"):
+                        for r in msg["retrieved_jds"]:
+                            similarity = max(0.0, 1.0 - r["distance"])
+                            label = r["title"] + (f" at {r['company']}" if r.get("company") else "")
+                            st.markdown(f"- **{label}** — {similarity:.0%} cosine similarity")
+
+        if question := st.chat_input("Ask anything about your job descriptions…"):
+            history.append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Searching JDs by semantic similarity…"):
+                    retrieved = query_store(jd_collection, question, embed_text, n_results=5)
+                with st.spinner("Generating answer with Gemini…"):
+                    answer = answer_jd_query(question, retrieved, resume_text)
+                st.markdown(answer)
+                if retrieved:
+                    with st.expander(f"🔍 {len(retrieved)} JDs retrieved by vector search"):
+                        for r in retrieved:
+                            similarity = max(0.0, 1.0 - r["distance"])
+                            label = r["title"] + (f" at {r['company']}" if r.get("company") else "")
+                            st.markdown(f"- **{label}** — {similarity:.0%} cosine similarity")
+
+            history.append({
+                "role": "assistant",
+                "content": answer,
+                "retrieved_jds": retrieved,
+            })
+            st.session_state.jd_chat_history = history
+
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
-st.caption("Built with Gemini 1.5 Pro · Adzuna Jobs API · Streamlit · ChromaDB")
+st.caption("Built with Gemini 2.0 Flash · text-embedding-004 · ChromaDB · Adzuna Jobs API · Streamlit")
